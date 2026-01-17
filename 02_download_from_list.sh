@@ -1,6 +1,7 @@
 #!/bin/bash
 
 INPUT_FILE="gwas_targets.tsv"
+CLEAN_FILE="gwas_targets.cleaned.tsv"
 DOWNLOAD_DIR="./raw_sumstats"
 LOG_FILE="download.log"
 SUCCESS_LOG="success.log"
@@ -10,10 +11,19 @@ mkdir -p "$DOWNLOAD_DIR"
 : > "$LOG_FILE"
 : > "$SUCCESS_LOG"
 
-if [ ! -f "$INPUT_FILE" ]; then
-    echo "Error: $INPUT_FILE not found. Run the python filter script first."
-    exit 1
-fi
+# --- Clean the input file ---
+# 1. Keep only rows with valid GCST accession in column 3
+# 2. Remove quotes from Trait
+# 3. Replace commas in Sample_Size with spaces
+# 4. Collapse multiple spaces
+awk -F'\t' 'NR==1{print;next}{
+  if ($3 ~ /^GCST[0-9]+$/) {
+    gsub(/"/,"",$2);          # remove quotes
+    gsub(/,/," ",$4);         # replace commas with spaces
+    gsub(/  +/," ",$4);       # collapse multiple spaces
+    print $1"\t"$2"\t"$3"\t"$4
+  }
+}' "$INPUT_FILE" > "$CLEAN_FILE"
 
 download_one() {
     category="$1"
@@ -25,19 +35,21 @@ download_one() {
     mkdir -p "$target_dir"
 
     # Skip if already downloaded
-    if ls "$target_dir/${accession}"*.tsv.gz >/dev/null 2>&1 || ls "$target_dir/${accession}"*.csv >/dev/null 2>&1; then
+    if ls "$target_dir/${accession}"*.tsv.gz >/dev/null 2>&1 || \
+       ls "$target_dir/${accession}"*.csv >/dev/null 2>&1; then
         echo "[SKIP] $accession already exists."
         return
     fi
 
-    # Extract numeric part of accession
-    num_id=$(echo "$accession" | sed 's/^GCST//' | sed 's/^0*//')
-    if ! [[ "$num_id" =~ ^[0-9]+$ ]]; then
+    # Validate accession
+    if [[ ! "$accession" =~ ^GCST[0-9]+$ ]]; then
         echo "Warning: Invalid ID format $accession"
         return
     fi
 
-    # Compute range folder (8-digit padding!)
+    num_id=${accession#GCST}
+    num_id=$(echo "$num_id" | sed 's/^0*//')
+
     lower=$(( ( (num_id - 1) / 1000 ) * 1000 + 1 ))
     upper=$(( lower + 999 ))
     range_str=$(printf "GCST%08d-GCST%08d" $lower $upper)
@@ -78,17 +90,18 @@ download_one() {
         return
     fi
 
-    # If nothing found
     echo "   ❌ Failed: No data found for $accession" >> "$LOG_FILE"
 }
 
 export -f download_one
 export DOWNLOAD_DIR LOG_FILE SUCCESS_LOG
 
-# Run in parallel, splitting on tabs
-tail -n +2 "$INPUT_FILE" | parallel --colsep '\t' -j $PARALLEL_JOBS download_one {1} {2} {3} {4}
+# Run in parallel on the cleaned file
+tail -n +2 "$CLEAN_FILE" | parallel --colsep '\t' -j $PARALLEL_JOBS download_one {1} {2} {3} {4}
 
 # Clean up zero-byte junk files
 find "$DOWNLOAD_DIR" -type f -size 0 -delete
 
+# make a index file: system, disease, GCST ID. 
+awk -F'\t' 'NR==1{print "System\tTrait\tGCST_ID";next}{print $1"\t"$2"\t"$3}' gwas_targets.clean.tsv > gwas_targets.index.tsv
 echo "🎉 All jobs finished!"
